@@ -16,9 +16,10 @@ EVALUATORS_CONFIG_PATH = "evaluators.yaml"
 MODELS_CONFIG_PATH = "models.yaml"
 
 # Default Models (can be overridden or logic added to select others)
-MODEL_TO_EVALUATE = "glm-4.6"
+MODEL_TO_EVALUATE = "kimi-k2.5"
 JUDGE_MODEL = "deepseek-chat"
-MAX_CONCURRENT_TASKS = 20  # Maximum number of concurrent API tasks
+MAX_CONCURRENT_EVALUATOR_TASKS = 150  # Maximum number of concurrent evaluator API tasks
+MAX_CONCURRENT_JUDGE_TASKS = 50  # Maximum number of concurrent judge API tasks
 
 QUERY_TEMPLATE = """
 What is the correct answer to this question: {question}"""
@@ -235,7 +236,8 @@ async def call_api_with_retry(client: AsyncOpenAI, messages: List[Dict], model: 
     return ""
 
 async def evaluate_task(
-    sem: asyncio.Semaphore,
+    evaluator_sem: asyncio.Semaphore,
+    judge_sem: asyncio.Semaphore,
     item: Dict[str, Any],
     evaluator_client: AsyncOpenAI,
     judge_client: AsyncOpenAI,
@@ -245,70 +247,70 @@ async def evaluate_task(
     judge_kwargs: Dict
 ) -> Optional[Dict[str, Any]]:
     """Evaluates a single task."""
-    async with sem:
-        try:
-            query = item['query']
-            gold_answer = item['answer']
-            item_id = item['id']
+    try:
+        query = item['query']
+        gold_answer = item['answer']
+        item_id = item['id']
     
 
-            # 1. Get Prediction
-            formatted_prompt = QUERY_TEMPLATE.format(question=query)
-            try:
+        # 1. Get Prediction
+        formatted_prompt = QUERY_TEMPLATE.format(question=query)
+        try:
+            async with evaluator_sem:
                 prediction = await call_api_with_retry(
                     evaluator_client,
                     [{"role": "user", "content": formatted_prompt}],
                     model=evaluator_model, # Usually ignored by openrouter if base_url is specific, but good practice
                     **evaluator_kwargs
                 )
-            except Exception:
-                return None # Fail silently/skip as requested
+        except Exception:
+            return None # Fail silently/skip as requested
 
-            # 2. Get Judgments (3 times)
-            judgments = []
-            
-            # We can run judgments in parallel too if desired, but let's keep it simple or sequential per task
-            # User said "api uses concurrent calling", which implies the tasks are concurrent.
-            # Inside a task, we can also be concurrent for the 3 judgments.
-            
-            judge_tasks = []
-            for i in range(3):
-                grader_prompt = GRADER_TEMPLATE.format(
-                    question=query,
-                    gold_answer=gold_answer,
-                    prediction=prediction
+        # 2. Get Judgments (3 times)
+        judgments = []
+        
+        # We can run judgments in parallel too if desired, but let's keep it simple or sequential per task
+        # User said "api uses concurrent calling", which implies the tasks are concurrent.
+        # Inside a task, we can also be concurrent for the 3 judgments.
+        
+        async def run_judge(seed: int) -> str:
+            grader_prompt = GRADER_TEMPLATE.format(
+                question=query,
+                gold_answer=gold_answer,
+                prediction=prediction
+            )
+            async with judge_sem:
+                return await call_api_with_retry(
+                    judge_client,
+                    [{"role": "user", "content": grader_prompt}],
+                    model=judge_model,
+                    seed=seed, # OpenAI supports seed
+                    **judge_kwargs
                 )
-                judge_tasks.append(
-                    call_api_with_retry(
-                        judge_client,
-                        [{"role": "user", "content": grader_prompt}],
-                        model=judge_model,
-                        seed=i, # OpenAI supports seed
-                        **judge_kwargs
-                    )
-                )
-            
-            try:
-                raw_judgments = await asyncio.gather(*judge_tasks)
-            except Exception:
-                 return None
 
-            for j_text in raw_judgments:
-                judgments.append(extract_classification(j_text))
+        judge_tasks = [run_judge(i) for i in range(3)]
+        
+        try:
+            raw_judgments = await asyncio.gather(*judge_tasks)
+        except Exception:
+             return None
 
-            final_score = calculate_score(judgments)
+        for j_text in raw_judgments:
+            judgments.append(extract_classification(j_text))
 
-            return {
-                "id": item_id,
-                "query": query,
-                "llm_answer": prediction,
-                "gold_answer": gold_answer,
-                "final_score": final_score
-            }
+        final_score = calculate_score(judgments)
 
-        except Exception as e:
-            print(f"Task {item.get('id')} failed: {e}")
-            return None
+        return {
+            "id": item_id,
+            "query": query,
+            "llm_answer": prediction,
+            "gold_answer": gold_answer,
+            "final_score": final_score
+        }
+
+    except Exception as e:
+        print(f"Task {item.get('id')} failed: {e}")
+        return None
 
 async def main_async():
     parser = argparse.ArgumentParser()
@@ -404,7 +406,8 @@ async def main_async():
             print("Output file exists but is not valid JSON. Starting fresh.")
 
     # 6. Run Tasks
-    sem = asyncio.Semaphore(MAX_CONCURRENT_TASKS) # Limit concurrency to avoid hitting rate limits too hard
+    evaluator_sem = asyncio.Semaphore(MAX_CONCURRENT_EVALUATOR_TASKS) # Limit evaluator concurrency to avoid hitting rate limits too hard
+    judge_sem = asyncio.Semaphore(MAX_CONCURRENT_JUDGE_TASKS) # Limit judge concurrency to avoid hitting rate limits too hard
     tasks = []
     
     # Identify tasks to run
@@ -422,7 +425,8 @@ async def main_async():
     for item in tasks_to_run:
         tasks.append(
             evaluate_task(
-                sem, 
+                evaluator_sem,
+                judge_sem,
                 item, 
                 evaluator_client, 
                 judge_client, 

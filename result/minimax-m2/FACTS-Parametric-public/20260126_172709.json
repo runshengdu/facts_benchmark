@@ -1,5 +1,5 @@
 {
-  "calculate_mean_score": 0.08087535680304472,
+  "calculate_mean_score": 0.08079847908745247,
   "results": [
     {
       "id": 852,
@@ -7356,6 +7356,13 @@
       "query": "choreographer of main aisa kyun hoon",
       "llm_answer": "The song “Main Aisa Kyun Hoon” was choreographed by the legendary Bollywood dance‑director **Saroj Khan**.",
       "gold_answer": "Prabhu Deva",
+      "final_score": 0.0
+    },
+    {
+      "id": 655,
+      "query": "Who was the MLA for the Highwood electoral district in Alberta after the election on May 29, 2023?",
+      "llm_answer": "The correct answer is **Ron Liepert** of the **United Conservative Party (UCP)**.\n\nHere's a breakdown:\n\n1.  **Election Date:** May 29, 2023.\n2.  **Electoral District:** Highwood (a rural district south of Calgary).\n3.  **Result:** Ron Liepert (UCP) was re-elected as the Member of the Legislative Assembly (MLA) for Highwood.\n4.  **Margin:** He won by a significant margin over his main opponent, Susan Billington (NDP).\n\n**Why this is correct:**\n\n*   Official results from Elections Alberta confirm Ron Liepert (UCP) received 17,578 votes (66.62%), significantly ahead of Susan Billington (NDP) with 6,765 votes (25.63%).\n*   This was a rematch of the 2019 election, where Liepert also defeated Billington.\n*   The 2023 Alberta general election resulted in the UCP forming a majority government, and Ron Liepert continued to represent the Highwood district.\n\nTherefore, **Ron Liepert** is the MLA for Highwood following the May 29, 2023 election.",
+      "gold_answer": "RJ Sigurdson",
       "final_score": 0.0
     }
   ]

@@ -1,5 +1,5 @@
 {
-  "calculate_mean_score": 0.07714285714285714,
+  "calculate_mean_score": 0.07706945765937202,
   "results": [
     {
       "id": 590,
@@ -7349,6 +7349,13 @@
       "query": "smjk jit sin school code",
       "llm_answer": "The school in question is **SMJK JIT Sin**, a Chinese high school in Kuching, Sarawak, Malaysia. In the context of the Unified Examination Certificate (UEC) registration and other official school code listings, the code assigned to SMJK JIT Sin is:\n\n**JIT**",
       "gold_answer": "PEB0045",
+      "final_score": 0.0
+    },
+    {
+      "id": 685,
+      "query": "doomsday viper actress",
+      "llm_answer": "",
+      "gold_answer": "Lee-Anne Liebenberg",
       "final_score": 0.0
     }
   ]
