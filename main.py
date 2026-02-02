@@ -18,7 +18,7 @@ MODELS_CONFIG_PATH = "models.yaml"
 # Default Models (can be overridden or logic added to select others)
 MODEL_TO_EVALUATE = "kimi-k2.5"
 JUDGE_MODEL = "deepseek-chat"
-MAX_CONCURRENT_EVALUATOR_TASKS = 150  # Maximum number of concurrent evaluator API tasks
+MAX_CONCURRENT_EVALUATOR_TASKS = 50  # Maximum number of concurrent evaluator API tasks
 MAX_CONCURRENT_JUDGE_TASKS = 50  # Maximum number of concurrent judge API tasks
 
 QUERY_TEMPLATE = """
@@ -316,25 +316,28 @@ async def main_async():
     parser = argparse.ArgumentParser()
     parser.add_argument("--save-to", help="Path to save the results")
     parser.add_argument("--num-tasks", type=int, help="Number of tasks to run from the start of the dataset")
+    parser.add_argument("--model-id", help="Model ID to evaluate (overrides MODEL_TO_EVALUATE)")
     args = parser.parse_args()
+
+    model_to_evaluate = args.model_id or MODEL_TO_EVALUATE
 
     # 1. Determine Output Path
     if args.save_to:
         output_path = Path(args.save_to)
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        model_slug = MODEL_TO_EVALUATE.replace("/", "_")
+        model_slug = model_to_evaluate.replace("/", "_")
         test_set_slug = DATASET_PATH.split(".")[0].split("/")[-1]
         output_path = Path(f"result/{model_slug}/{test_set_slug}/{timestamp}.json")
     
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # 2. Load Configs
-    evaluator_config = load_yaml_config(MODELS_CONFIG_PATH, MODEL_TO_EVALUATE)
+    model_config = load_yaml_config(MODELS_CONFIG_PATH, model_to_evaluate)
     judge_config = load_yaml_config(EVALUATORS_CONFIG_PATH, JUDGE_MODEL)
 
-    if not evaluator_config:
-        print(f"Could not load config for evaluator model: {MODEL_TO_EVALUATE}")
+    if not model_config:
+        print(f"Could not load config for model: {model_to_evaluate}")
         return
     if not judge_config:
         print(f"Could not load config for judge model: {JUDGE_MODEL}")
@@ -359,7 +362,7 @@ async def main_async():
                 
         return params, chat_kwargs
 
-    eval_params, eval_kwargs = get_client_params(evaluator_config)
+    eval_params, eval_kwargs = get_client_params(model_config)
     judge_params, judge_kwargs = get_client_params(judge_config)
 
     evaluator_client = AsyncOpenAI(**eval_params)
@@ -430,7 +433,7 @@ async def main_async():
                 item, 
                 evaluator_client, 
                 judge_client, 
-                MODEL_TO_EVALUATE, 
+                model_to_evaluate,
                 JUDGE_MODEL,
                 eval_kwargs,
                 judge_kwargs
@@ -452,6 +455,8 @@ async def main_async():
                 mean_score = calculate_mean_score(all_results)
                 final_output = {
                     "calculate_mean_score": mean_score,
+                    "model_config": model_config,
+                    "judge_config": judge_config,
                     "results": all_results
                 }
                 
