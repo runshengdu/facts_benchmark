@@ -343,6 +343,12 @@ async def main_async():
         print(f"Could not load config for judge model: {JUDGE_MODEL}")
         return
 
+    def redact_api_key(config: Dict[str, Any]) -> Dict[str, Any]:
+        return {key: value for key, value in config.items() if key != "api_key"}
+
+    model_config_safe = redact_api_key(model_config)
+    judge_config_safe = redact_api_key(judge_config)
+
     # 3. Setup Clients
     # Extract params for OpenAI client
     def get_client_params(config):
@@ -455,8 +461,8 @@ async def main_async():
                 mean_score = calculate_mean_score(all_results)
                 final_output = {
                     "calculate_mean_score": mean_score,
-                    "model_config": model_config,
-                    "judge_config": judge_config,
+                    "model_config": model_config_safe,
+                    "judge_config": judge_config_safe,
                     "results": all_results
                 }
                 

@@ -4,7 +4,6 @@
     "name": "openai/gpt-5.2",
     "temperature": 1.0,
     "base_url": "https://openrouter.ai/api/v1",
-    "api_key": "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",
     "extra_body": {
       "reasoning": {
         "effort": "xhigh"
@@ -15,7 +14,6 @@
     "name": "deepseek-chat",
     "temperature": 1.0,
     "base_url": "https://api.deepseek.com",
-    "api_key": "sk-6e2e731a8096447eb1539610e9866791",
     "max_tokens": 8000
   },
   "results": [
