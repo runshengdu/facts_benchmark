@@ -15,11 +15,6 @@ DATASET_PATH = "dataset/FACTS-Parametric-public.csv"
 EVALUATORS_CONFIG_PATH = "evaluators.yaml"
 MODELS_CONFIG_PATH = "models.yaml"
 
-# Default Models (can be overridden or logic added to select others)
-MODEL_TO_EVALUATE = "kimi-k2.5"
-JUDGE_MODEL = "deepseek-chat"
-MAX_CONCURRENT_EVALUATOR_TASKS = 50  # Maximum number of concurrent evaluator API tasks
-MAX_CONCURRENT_JUDGE_TASKS = 50  # Maximum number of concurrent judge API tasks
 
 QUERY_TEMPLATE = """
 What is the correct answer to this question: {question}"""
@@ -316,10 +311,16 @@ async def main_async():
     parser = argparse.ArgumentParser()
     parser.add_argument("--save-to", help="Path to save the results")
     parser.add_argument("--num-tasks", type=int, help="Number of tasks to run from the start of the dataset")
-    parser.add_argument("--model-id", help="Model ID to evaluate (overrides MODEL_TO_EVALUATE)")
+    parser.add_argument("--model-id", help="Model ID to evaluate")
+    parser.add_argument("--judge-model", default="deepseek-reasoner", help="Judge Model ID")
+    parser.add_argument("--concurrency-eval", type=int, default=50, help="Max concurrent evaluator tasks")
+    parser.add_argument("--concurrency-judge", type=int, default=50, help="Max concurrent judge tasks")
     args = parser.parse_args()
 
-    model_to_evaluate = args.model_id or MODEL_TO_EVALUATE
+    model_to_evaluate = args.model_id 
+    judge_model = args.judge_model 
+    max_concurrent_evaluator_tasks = args.concurrency_eval 
+    max_concurrent_judge_tasks = args.concurrency_judge 
 
     # 1. Determine Output Path
     if args.save_to:
@@ -334,13 +335,13 @@ async def main_async():
 
     # 2. Load Configs
     model_config = load_yaml_config(MODELS_CONFIG_PATH, model_to_evaluate)
-    judge_config = load_yaml_config(EVALUATORS_CONFIG_PATH, JUDGE_MODEL)
+    judge_config = load_yaml_config(EVALUATORS_CONFIG_PATH, judge_model)
 
     if not model_config:
         print(f"Could not load config for model: {model_to_evaluate}")
         return
     if not judge_config:
-        print(f"Could not load config for judge model: {JUDGE_MODEL}")
+        print(f"Could not load config for judge model: {judge_model}")
         return
 
     def redact_api_key(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -415,8 +416,8 @@ async def main_async():
             print("Output file exists but is not valid JSON. Starting fresh.")
 
     # 6. Run Tasks
-    evaluator_sem = asyncio.Semaphore(MAX_CONCURRENT_EVALUATOR_TASKS) # Limit evaluator concurrency to avoid hitting rate limits too hard
-    judge_sem = asyncio.Semaphore(MAX_CONCURRENT_JUDGE_TASKS) # Limit judge concurrency to avoid hitting rate limits too hard
+    evaluator_sem = asyncio.Semaphore(max_concurrent_evaluator_tasks) # Limit evaluator concurrency to avoid hitting rate limits too hard
+    judge_sem = asyncio.Semaphore(max_concurrent_judge_tasks) # Limit judge concurrency to avoid hitting rate limits too hard
     tasks = []
     
     # Identify tasks to run
@@ -440,7 +441,7 @@ async def main_async():
                 evaluator_client, 
                 judge_client, 
                 model_to_evaluate,
-                JUDGE_MODEL,
+                judge_model,
                 eval_kwargs,
                 judge_kwargs
             )
