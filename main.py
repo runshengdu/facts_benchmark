@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import csv
+import hashlib
 import json
 import os
 from datetime import datetime
@@ -9,6 +10,7 @@ from typing import List, Dict, Any, Optional
 import yaml
 from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm
+from common_config import order_result_payload
 
 # Configuration Constants
 DATASET_PATH = "dataset/FACTS-Parametric-public.csv"
@@ -167,11 +169,12 @@ def calculate_mean_score(run_results):
     scores = []
     for result in run_results:
         # Check if it's our new format or old format (handling both for robustness)
-        if "final_score" in result:
-             scores.append(result["final_score"])
+        if "final_score" in result and result["final_score"] is not None:
+            scores.append(result["final_score"])
         elif "dictResult" in result:
             score = result["dictResult"].get("score", 0.0)
-            scores.append(score)
+            if score is not None:
+                scores.append(score)
     
     if len(scores) > 0:
         mean_score = sum(scores) / len(scores)
@@ -201,10 +204,16 @@ def load_yaml_config(path: str, model_name: str) -> Optional[Dict[str, Any]]:
         print(f"Error loading config from {path}: {e}")
     return None
 
-async def call_api_with_retry(client: AsyncOpenAI, messages: List[Dict], model: str, **kwargs) -> str:
+async def call_api_with_retry(
+    client: AsyncOpenAI,
+    messages: List[Dict],
+    model: str,
+    request_label: str = "",
+    **kwargs
+) -> str:
     """Calls OpenAI API with retries using streaming."""
-    retries = 3
-    for attempt in range(retries):
+    max_attempts = 3
+    for attempt in range(max_attempts):
         try:
             # Enable streaming
             kwargs['stream'] = True
@@ -223,51 +232,160 @@ async def call_api_with_retry(client: AsyncOpenAI, messages: List[Dict], model: 
             return "".join(collected_content)
 
         except Exception as e:
-            if attempt == retries - 1:
-                print(f"API call failed after {retries} attempts: {e}")
-                raise e
+            if attempt == max_attempts - 1:
+                label = f"{request_label} " if request_label else ""
+                raise RuntimeError(
+                    f"{label}API call failed after {max_attempts} attempts: {e}"
+                ) from e
             # Simple backoff
             await asyncio.sleep(1 * (attempt + 1))
     return ""
 
-async def evaluate_task(
+def redact_api_key(config: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in config.items() if key != "api_key"}
+
+
+def get_client_params(config: Dict[str, Any]):
+    params = {
+        "api_key": config.get("api_key"),
+        "base_url": config.get("base_url"),
+    }
+
+    # Keys consumed by client init or internal logic, not to be passed to chat.completions.create
+    exclude_keys = {"name", "api_key", "base_url"}
+
+    # Filter kwargs for chat completion
+    chat_kwargs = {}
+    for key, value in config.items():
+        if key not in exclude_keys:
+            chat_kwargs[key] = value
+
+    return params, chat_kwargs
+
+
+def write_json_output(output_path: Path, payload: Dict[str, Any]) -> None:
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(order_result_payload(payload), f, indent=2, ensure_ascii=False)
+
+
+def has_required_generation_fields(result: Dict[str, Any]) -> bool:
+    required_fields = ["query", "llm_answer", "gold_answer"]
+    for key in required_fields:
+        if key not in result or result[key] is None or str(result[key]).strip() == "":
+            return False
+    return True
+
+
+def normalize_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def has_non_empty_text(value: Any) -> bool:
+    return normalize_text(value) != ""
+
+
+def filter_results_with_non_empty_answers(
+    results: List[Any],
+    context: str,
+) -> List[Any]:
+    filtered: List[Any] = []
+    for idx, result in enumerate(results):
+        if not isinstance(result, dict):
+            filtered.append(result)
+            continue
+        if has_non_empty_text(result.get("llm_answer")):
+            filtered.append(result)
+            continue
+        hash_key = result.get("hash_key") or build_hash_key_from_result_row(result)
+        print(f"[{context}] Skip empty llm_answer at index {idx}, hash_key={hash_key}")
+    return filtered
+
+
+def build_hash_key(query: Any, gold_answer: Any) -> str:
+    material = f"{normalize_text(query)}\n{normalize_text(gold_answer)}"
+    digest = hashlib.sha1(material.encode("utf-8")).hexdigest()
+    return digest
+
+
+def build_hash_key_from_dataset_row(row: Dict[str, Any]) -> str:
+    return build_hash_key(row.get("query"), row.get("answer"))
+
+
+def build_hash_key_from_result_row(row: Dict[str, Any]) -> Optional[str]:
+    existing_hash_key = normalize_text(row.get("hash_key"))
+    if existing_hash_key:
+        return existing_hash_key
+    query = row.get("query")
+    gold_answer = row.get("gold_answer", row.get("answer"))
+    if not has_non_empty_text(query) and not has_non_empty_text(gold_answer):
+        return None
+    return build_hash_key(query, gold_answer)
+
+
+async def generate_task(
     evaluator_sem: asyncio.Semaphore,
-    judge_sem: asyncio.Semaphore,
     item: Dict[str, Any],
     evaluator_client: AsyncOpenAI,
-    judge_client: AsyncOpenAI,
     evaluator_model: str,
-    judge_model: str,
-    evaluator_kwargs: Dict,
-    judge_kwargs: Dict
+    evaluator_kwargs: Dict
 ) -> Optional[Dict[str, Any]]:
-    """Evaluates a single task."""
+    """Generates model output for a single task."""
     try:
         query = item['query']
+        item_hash_key = item.get("hash_key") or build_hash_key_from_dataset_row(item)
         gold_answer = item['answer']
-        item_id = item['id']
-    
 
-        # 1. Get Prediction
         formatted_prompt = QUERY_TEMPLATE.format(question=query)
         try:
             async with evaluator_sem:
                 prediction = await call_api_with_retry(
                     evaluator_client,
                     [{"role": "user", "content": formatted_prompt}],
-                    model=evaluator_model, # Usually ignored by openrouter if base_url is specific, but good practice
+                    model=evaluator_model,
+                    request_label=f"[generation] hash_key={item_hash_key}",
                     **evaluator_kwargs
                 )
-        except Exception:
-            return None # Fail silently/skip as requested
+        except Exception as e:
+            print(f"[generation] Skip hash_key={item_hash_key}, query={query!r}, error={e}")
+            return None
 
-        # 2. Get Judgments (3 times)
-        judgments = []
-        
-        # We can run judgments in parallel too if desired, but let's keep it simple or sequential per task
-        # User said "api uses concurrent calling", which implies the tasks are concurrent.
-        # Inside a task, we can also be concurrent for the 3 judgments.
-        
+        if not has_non_empty_text(prediction):
+            print(f"[generation] Skip hash_key={item_hash_key}, query={query!r}, error=empty API response")
+            return None
+
+        return {
+            "hash_key": item_hash_key,
+            "query": query,
+            "llm_answer": prediction,
+            "gold_answer": gold_answer,
+            "final_score": None
+        }
+
+    except Exception as e:
+        print(f"Task {item.get('hash_key')} failed: {e}")
+        return None
+
+
+async def evaluate_existing_result(
+    judge_sem: asyncio.Semaphore,
+    result_idx: int,
+    item: Dict[str, Any],
+    judge_client: AsyncOpenAI,
+    judge_model: str,
+    judge_kwargs: Dict
+) -> Optional[tuple]:
+    """Evaluates an already generated result entry and returns (index, final_score)."""
+    try:
+        if item.get("final_score") is not None:
+            return None
+
+        query = item["query"]
+        gold_answer = item["gold_answer"]
+        prediction = item["llm_answer"]
+        item_hash_key = item.get("hash_key") or build_hash_key_from_result_row(item)
+
         async def run_judge(seed: int) -> str:
             grader_prompt = GRADER_TEMPLATE.format(
                 question=query,
@@ -279,50 +397,31 @@ async def evaluate_task(
                     judge_client,
                     [{"role": "user", "content": grader_prompt}],
                     model=judge_model,
-                    seed=seed, # OpenAI supports seed
+                    request_label=f"[evaluation] hash_key={item_hash_key} seed={seed}",
+                    seed=seed,
                     **judge_kwargs
                 )
 
-        judge_tasks = [run_judge(i) for i in range(3)]
-        
-        try:
-            raw_judgments = await asyncio.gather(*judge_tasks)
-        except Exception:
-             return None
-
-        for j_text in raw_judgments:
-            judgments.append(extract_classification(j_text))
-
+        raw_judgments = await asyncio.gather(*[run_judge(i) for i in range(3)])
+        if not all(has_non_empty_text(j_text) for j_text in raw_judgments):
+            print(f"[evaluation] Skip hash_key={item_hash_key}, error=empty judge API response")
+            return None
+        judgments = [extract_classification(j_text) for j_text in raw_judgments]
         final_score = calculate_score(judgments)
-
-        return {
-            "id": item_id,
-            "query": query,
-            "llm_answer": prediction,
-            "gold_answer": gold_answer,
-            "final_score": final_score
-        }
-
+        return result_idx, final_score
     except Exception as e:
-        print(f"Task {item.get('id')} failed: {e}")
+        print(f"[evaluation] Skip hash_key={item.get('hash_key')}, error={e}")
         return None
 
-async def main_async():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--save-to", help="Path to save the results")
-    parser.add_argument("--num-tasks", type=int, help="Number of tasks to run from the start of the dataset")
-    parser.add_argument("--model-id", help="Model ID to evaluate")
-    parser.add_argument("--judge-model", default="deepseek-reasoner", help="Judge Model ID")
-    parser.add_argument("--concurrency-eval", type=int, default=50, help="Max concurrent evaluator tasks")
-    parser.add_argument("--concurrency-judge", type=int, default=50, help="Max concurrent judge tasks")
-    args = parser.parse_args()
 
-    model_to_evaluate = args.model_id 
-    judge_model = args.judge_model 
-    max_concurrent_evaluator_tasks = args.concurrency_eval 
-    max_concurrent_judge_tasks = args.concurrency_judge 
+async def run_generation_mode(args) -> None:
+    model_to_evaluate = args.model_id
+    max_concurrent_evaluator_tasks = args.gen_workers
 
-    # 1. Determine Output Path
+    if not model_to_evaluate:
+        print("Generation mode requires --model-id.")
+        return
+
     if args.save_to:
         output_path = Path(args.save_to)
     else:
@@ -330,61 +429,24 @@ async def main_async():
         model_slug = model_to_evaluate.replace("/", "_")
         test_set_slug = DATASET_PATH.split(".")[0].split("/")[-1]
         output_path = Path(f"result/{model_slug}/{test_set_slug}/{timestamp}.json")
-    
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 2. Load Configs
     model_config = load_yaml_config(MODELS_CONFIG_PATH, model_to_evaluate)
-    judge_config = load_yaml_config(EVALUATORS_CONFIG_PATH, judge_model)
-
     if not model_config:
         print(f"Could not load config for model: {model_to_evaluate}")
         return
-    if not judge_config:
-        print(f"Could not load config for judge model: {judge_model}")
-        return
-
-    def redact_api_key(config: Dict[str, Any]) -> Dict[str, Any]:
-        return {key: value for key, value in config.items() if key != "api_key"}
-
     model_config_safe = redact_api_key(model_config)
-    judge_config_safe = redact_api_key(judge_config)
-
-    # 3. Setup Clients
-    # Extract params for OpenAI client
-    def get_client_params(config):
-        params = {
-            "api_key": config.get("api_key"),
-            "base_url": config.get("base_url"),
-        }
-        
-        # Keys consumed by client init or internal logic, not to be passed to chat.completions.create
-        exclude_keys = {"name", "api_key", "base_url"}
-        
-        # Filter kwargs for chat completion
-        chat_kwargs = {}
-        for key, value in config.items():
-            if key not in exclude_keys:
-                chat_kwargs[key] = value
-                
-        return params, chat_kwargs
 
     eval_params, eval_kwargs = get_client_params(model_config)
-    judge_params, judge_kwargs = get_client_params(judge_config)
-
     evaluator_client = AsyncOpenAI(**eval_params)
-    judge_client = AsyncOpenAI(**judge_params)
 
-    # 4. Load Dataset
     try:
         with open(DATASET_PATH, 'r', encoding='utf-8', newline='') as f:
             reader = csv.DictReader(f)
             dataset = []
             for idx, row in enumerate(reader):
                 item = dict(row)
-                item_id = item.get("id")
-                if item_id is None or str(item_id).strip() == "":
-                    item["id"] = idx
+                item["hash_key"] = build_hash_key_from_dataset_row(item)
                 dataset.append(item)
     except FileNotFoundError:
         print(f"Dataset not found at {DATASET_PATH}")
@@ -393,93 +455,176 @@ async def main_async():
     if args.num_tasks:
         dataset = dataset[:args.num_tasks]
 
-    # 5. Resume Logic
-    completed_ids = set()
     existing_results = []
-    
+    completed_hash_keys = set()
     if output_path.exists():
         try:
             with open(output_path, 'r', encoding='utf-8') as f:
                 content = json.load(f)
-                # Check format. If it has 'results' list, use that.
-                if isinstance(content, dict) and "results" in content:
-                    existing_results = content["results"]
-                elif isinstance(content, list):
-                    # Legacy or simple list
-                    existing_results = content
-                
-                for res in existing_results:
-                    if "id" in res and res.get("final_score") is not None:
-                        completed_ids.add(res["id"])
-            print(f"Resuming... {len(completed_ids)} tasks already completed.")
+            if isinstance(content, dict) and "results" in content:
+                existing_results = content["results"]
+            elif isinstance(content, list):
+                existing_results = content
+
+            existing_results = filter_results_with_non_empty_answers(
+                existing_results,
+                "resume generation",
+            )
+            for res in existing_results:
+                if not isinstance(res, dict) or not has_non_empty_text(res.get("llm_answer")):
+                    continue
+                hash_key = build_hash_key_from_result_row(res)
+                if hash_key:
+                    completed_hash_keys.add(hash_key)
+            print(f"Resuming generation... {len(completed_hash_keys)} tasks already completed.")
         except json.JSONDecodeError:
             print("Output file exists but is not valid JSON. Starting fresh.")
 
-    # 6. Run Tasks
-    evaluator_sem = asyncio.Semaphore(max_concurrent_evaluator_tasks) # Limit evaluator concurrency to avoid hitting rate limits too hard
-    judge_sem = asyncio.Semaphore(max_concurrent_judge_tasks) # Limit judge concurrency to avoid hitting rate limits too hard
-    tasks = []
-    
-    # Identify tasks to run
-    tasks_to_run = []
-    for item in dataset:
-        if item['id'] in completed_ids:
-            continue
-        tasks_to_run.append(item)
-    
+    tasks_to_run = [item for item in dataset if item["hash_key"] not in completed_hash_keys]
     print(f"Total tasks: {len(dataset)}")
-    print(f"Already completed (Skipped): {len(completed_ids)}")
+    print(f"Already completed (Skipped): {len(completed_hash_keys)}")
     print(f"Tasks to run: {len(tasks_to_run)}")
 
-    # Create coroutines for tasks
-    for item in tasks_to_run:
-        tasks.append(
-            evaluate_task(
-                evaluator_sem,
-                judge_sem,
-                item, 
-                evaluator_client, 
-                judge_client, 
-                model_to_evaluate,
-                judge_model,
-                eval_kwargs,
-                judge_kwargs
-            )
+    evaluator_sem = asyncio.Semaphore(max_concurrent_evaluator_tasks)
+    tasks = [
+        generate_task(
+            evaluator_sem=evaluator_sem,
+            item=item,
+            evaluator_client=evaluator_client,
+            evaluator_model=model_to_evaluate,
+            evaluator_kwargs=eval_kwargs
         )
+        for item in tasks_to_run
+    ]
 
-    # Use as_completed to process results as they finish
-    new_results = []
-    all_results = list(existing_results) # Start with existing results
-    
+    all_results = list(existing_results)
+    if tasks:
+        for future in tqdm.as_completed(tasks, total=len(tasks), desc="Generating"):
+            result = await future
+            if not result:
+                continue
+            all_results.append(result)
+            final_output = {
+                "calculate_mean_score": None,
+                "model_config": model_config_safe,
+                "results": all_results
+            }
+            try:
+                write_json_output(output_path, final_output)
+            except Exception as e:
+                print(f"Error saving progress: {e}")
+
+    print(f"Generation complete. Saved to {output_path}")
+
+
+async def run_evaluation_mode(args) -> None:
+    output_path = Path(args.evaluate_file)
+    if not output_path.exists():
+        print(f"Evaluate file not found: {output_path}")
+        return
+
+    judge_model = args.judge_model
+    max_concurrent_judge_tasks = args.eval_workers
+    judge_config = load_yaml_config(EVALUATORS_CONFIG_PATH, judge_model)
+    if not judge_config:
+        print(f"Could not load config for judge model: {judge_model}")
+        return
+    judge_config_safe = redact_api_key(judge_config)
+
+    judge_params, judge_kwargs = get_client_params(judge_config)
+    judge_client = AsyncOpenAI(**judge_params)
+
+    try:
+        with open(output_path, 'r', encoding='utf-8') as f:
+            content = json.load(f)
+    except json.JSONDecodeError:
+        print(f"Evaluate file is not valid JSON: {output_path}")
+        return
+
+    if isinstance(content, dict):
+        if "results" not in content or not isinstance(content["results"], list):
+            print("Evaluate file must contain a 'results' list.")
+            return
+        output_content = content
+        all_results = output_content["results"]
+    elif isinstance(content, list):
+        all_results = content
+        output_content = {
+            "calculate_mean_score": 0.0,
+            "results": all_results
+        }
+    else:
+        print("Evaluate file JSON root must be an object or a list.")
+        return
+
+    output_content["judge_config"] = judge_config_safe
+
+    to_evaluate = []
+    skipped_completed = 0
+    skipped_invalid = 0
+    for idx, result in enumerate(all_results):
+        if result.get("final_score") is not None:
+            skipped_completed += 1
+            continue
+        if not has_required_generation_fields(result):
+            skipped_invalid += 1
+            print(f"Skipping invalid result at index {idx}: missing or empty query/llm_answer/gold_answer")
+            continue
+        to_evaluate.append((idx, result))
+
+    print(f"Total results: {len(all_results)}")
+    print(f"Already scored (Skipped): {skipped_completed}")
+    print(f"Invalid rows (Skipped): {skipped_invalid}")
+    print(f"Rows to evaluate: {len(to_evaluate)}")
+
+    judge_sem = asyncio.Semaphore(max_concurrent_judge_tasks)
+    tasks = [
+        evaluate_existing_result(
+            judge_sem=judge_sem,
+            result_idx=result_idx,
+            item=result_item,
+            judge_client=judge_client,
+            judge_model=judge_model,
+            judge_kwargs=judge_kwargs
+        )
+        for result_idx, result_item in to_evaluate
+    ]
+
     if tasks:
         for future in tqdm.as_completed(tasks, total=len(tasks), desc="Evaluating"):
-            result = await future
-            if result:
-                new_results.append(result)
-                all_results.append(result)
-                
-                # Real-time saving
-                mean_score = calculate_mean_score(all_results)
-                final_output = {
-                    "calculate_mean_score": mean_score,
-                    "model_config": model_config_safe,
-                    "judge_config": judge_config_safe,
-                    "results": all_results
-                }
-                
-                # Write to file (rewrite the whole file for safety and simplicity with JSON structure)
-                # For very large datasets, append mode to a JSONL file is better, but user requested specific JSON structure.
-                try:
-                    with open(output_path, 'w', encoding='utf-8') as f:
-                        json.dump(final_output, f, indent=2, ensure_ascii=False)
-                except Exception as e:
-                    print(f"Error saving progress: {e}")
+            evaluated = await future
+            if not evaluated:
+                continue
+            result_idx, final_score = evaluated
+            all_results[result_idx]["final_score"] = final_score
 
-    # Final calculation (already done in loop, but good to ensure consistency)
-    mean_score = calculate_mean_score(all_results)
-    
+            output_content["calculate_mean_score"] = calculate_mean_score(all_results)
+            try:
+                write_json_output(output_path, output_content)
+            except Exception as e:
+                print(f"Error saving progress: {e}")
+
+    output_content["calculate_mean_score"] = calculate_mean_score(all_results)
+    write_json_output(output_path, output_content)
     print(f"Evaluation complete. Saved to {output_path}")
-    print(f"Mean Score: {mean_score}")
+    print(f"Mean Score: {output_content['calculate_mean_score']}")
+
+async def main_async():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--save-to", help="Path to save the results")
+    parser.add_argument("--evaluate-file", help="Path to generated JSON file for in-place scoring")
+    parser.add_argument("--num-tasks", type=int, help="Number of tasks to run from the start of the dataset")
+    parser.add_argument("--model-id", help="Model ID to evaluate")
+    parser.add_argument("--judge-model", default="deepseek-v4-flash", help="Judge Model ID")
+    parser.add_argument("--gen-workers", type=int, default=50, help="Max concurrent generation tasks")
+    parser.add_argument("--eval-workers", type=int, default=50, help="Max concurrent evaluation tasks")
+    args = parser.parse_args()
+    if args.evaluate_file:
+        if args.save_to:
+            print("--save-to is ignored in evaluation mode; results are written in-place.")
+        await run_evaluation_mode(args)
+    else:
+        await run_generation_mode(args)
 
 def main():
     asyncio.run(main_async())

@@ -57,29 +57,43 @@ python main.py [options]
 ### Arguments
 
 - `--save-to`: (Optional) Custom path to save the results JSON file.
+- `--evaluate-file`: (Optional) Enter evaluation mode and score an existing generated JSON file in-place.
 - `--num-tasks`: (Optional) Number of tasks to run from the start of the dataset. Useful for testing.
+- `--model-id`: Model ID used in generation mode.
+- `--judge-model`: Judge model ID used in evaluation mode (default: `deepseek-chat`).
 
 ### Examples
 
-Run evaluation on all tasks:
+Run generation on all tasks:
 ```bash
-python main.py
+python main.py --model-id doubao-seed-2-0-pro-260215
 ```
 
 Run only the first 10 tasks:
 ```bash
-python main.py --num-tasks 10
+python main.py --model-id doubao-seed-2-0-pro-260215 --num-tasks 10
 ```
 
 Save results to a specific file:
 ```bash
-python main.py --save-to results/my_eval.json
+python main.py --model-id doubao-seed-2-0-pro-260215 --save-to results/my_generated.json
+```
+
+Evaluate an existing generated file in-place:
+```bash
+python main.py --evaluate-file result/doubao-seed-2-0-pro-260215/FACTS-Parametric-public/20260224_161817.json --judge-model deepseek-chat
 ```
 
 ## How It Works
 
-1. **Dataset Loading**: Reads questions and gold answers from `dataset/FACTS-Parametric-public.csv`.
-2. **Prediction**: Queries the target model (defined in `main.py` as `MODEL_TO_EVALUATE`) for an answer.
+1. **Generation Mode**:
+   - Reads questions and gold answers from `dataset/FACTS-Parametric-public.csv`.
+   - Queries the target model for `llm_answer`.
+   - Writes each row with: `id`, `query`, `llm_answer`, `gold_answer`, `final_score` (`null` before scoring).
+2. **Evaluation Mode**:
+   - Reads an existing generated JSON via `--evaluate-file`.
+   - Skips rows where `final_score` is already non-null.
+   - Uses the judge model to score remaining rows and writes back to the same file.
 3. **Grading**:
    - The judge model (defined as `JUDGE_MODEL`) compares the predicted answer with the gold answer.
    - Grading is performed 3 times for robustness.
@@ -87,7 +101,9 @@ python main.py --save-to results/my_eval.json
 4. **Scoring**:
    - A score of `1.0` is assigned if **all 3** judgments are `CORRECT`.
    - Otherwise, the score is `0.0`.
-5. **Output**: Results are saved incrementally to a JSON file.
+5. **Output**:
+   - Generation mode: `calculate_mean_score` is `null`.
+   - Evaluation mode: `calculate_mean_score` is updated from non-null `final_score` rows only.
 
 ## Output Format
 

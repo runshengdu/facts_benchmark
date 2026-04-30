@@ -1,0 +1,5 @@
+result 
+batch_api/**/artifacts
+**/evaluators.yaml
+**/models.yaml
+**/*.pyc
