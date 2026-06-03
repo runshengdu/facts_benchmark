@@ -3,14 +3,12 @@ import asyncio
 import csv
 import hashlib
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-import yaml
 from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm
-from common_config import order_result_payload
+from common_config import get_client_params, load_yaml_config, order_result_payload
 
 # Configuration Constants
 DATASET_PATH = "dataset/FACTS-Parametric-public.csv"
@@ -183,27 +181,6 @@ def calculate_mean_score(run_results):
     
     return mean_score
 
-def load_yaml_config(path: str, model_name: str) -> Optional[Dict[str, Any]]:
-    """Loads configuration for a specific model from a YAML file."""
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            data = yaml.safe_load(f)
-            models = data.get('models', [])
-            for model in models:
-                if model.get('name') == model_name:
-                    # Substitute environment variables
-                    config = model.copy()
-                    if 'api_key' in config:
-                        config['api_key'] = os.path.expandvars(config['api_key'])
-                        # Also handle ${VAR} syntax manually if expandvars doesn't catch it all
-                        if config['api_key'].startswith('${') and config['api_key'].endswith('}'):
-                            var_name = config['api_key'][2:-1]
-                            config['api_key'] = os.environ.get(var_name, '')
-                    return config
-    except Exception as e:
-        print(f"Error loading config from {path}: {e}")
-    return None
-
 async def call_api_with_retry(
     client: AsyncOpenAI,
     messages: List[Dict],
@@ -243,24 +220,6 @@ async def call_api_with_retry(
 
 def redact_api_key(config: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in config.items() if key != "api_key"}
-
-
-def get_client_params(config: Dict[str, Any]):
-    params = {
-        "api_key": config.get("api_key"),
-        "base_url": config.get("base_url"),
-    }
-
-    # Keys consumed by client init or internal logic, not to be passed to chat.completions.create
-    exclude_keys = {"name", "api_key", "base_url"}
-
-    # Filter kwargs for chat completion
-    chat_kwargs = {}
-    for key, value in config.items():
-        if key not in exclude_keys:
-            chat_kwargs[key] = value
-
-    return params, chat_kwargs
 
 
 def write_json_output(output_path: Path, payload: Dict[str, Any]) -> None:

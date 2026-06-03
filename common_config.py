@@ -38,13 +38,26 @@ def load_yaml_config(path: str, model_name: str) -> dict[str, Any] | None:
     return None
 
 
+CHAT_COMPLETION_TOKEN_LIMIT_KEYS = ("max_completion_tokens", "max_tokens")
+
+
+def token_limit_kwargs_from_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Return token limit kwargs using the key(s) declared in YAML (no renaming)."""
+    return {
+        key: config[key]
+        for key in CHAT_COMPLETION_TOKEN_LIMIT_KEYS
+        if key in config and config[key] is not None
+    }
+
+
 def get_client_params(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     params = {
         "api_key": config.get("api_key"),
         "base_url": config.get("base_url"),
     }
-    exclude_keys = {"name", "api_key", "base_url"}
+    exclude_keys = {"name", "api_key", "base_url", *CHAT_COMPLETION_TOKEN_LIMIT_KEYS}
     chat_kwargs = {k: v for k, v in config.items() if k not in exclude_keys}
+    chat_kwargs.update(token_limit_kwargs_from_config(config))
     return params, chat_kwargs
 
 
