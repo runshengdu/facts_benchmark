@@ -16,7 +16,7 @@ models:
     temperature: 1.0
     base_url: https://api.minimaxi.com/v1
     api_key: "${MINIMAX_API_KEY}"
-    max_completion_tokens: 60000
+    max_completion_tokens: 131072
     extra_body: {reasoning_split: true}
 
   - name: deepseek-v4-pro

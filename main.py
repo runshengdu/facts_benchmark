@@ -574,7 +574,7 @@ async def main_async():
     parser.add_argument("--evaluate-file", help="Path to generated JSON file for in-place scoring")
     parser.add_argument("--num-tasks", type=int, help="Number of tasks to run from the start of the dataset")
     parser.add_argument("--model-id", help="Model ID to evaluate")
-    parser.add_argument("--judge-model", default="deepseek-v4-flash", help="Judge Model ID")
+    parser.add_argument("--judge-model", default="deepseek-v4-pro", help="Judge Model ID")
     parser.add_argument("--gen-workers", type=int, default=50, help="Max concurrent generation tasks")
     parser.add_argument("--eval-workers", type=int, default=50, help="Max concurrent evaluation tasks")
     args = parser.parse_args()

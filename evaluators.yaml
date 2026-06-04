@@ -1,5 +1,5 @@
 models:
-  - name: deepseek-v4-flash
+  - name: deepseek-v4-pro
     temperature: 1.0
     base_url: https://api.deepseek.com
     api_key: "${DEEPSEEK_API_KEY}"
