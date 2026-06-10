@@ -1,4 +1,4 @@
 batch_api/**/artifacts
-**/evaluators.yaml
-**/models.yaml
+evaluators.yaml
+models.yaml
 **/*.pyc

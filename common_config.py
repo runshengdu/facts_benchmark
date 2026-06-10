@@ -5,14 +5,38 @@ import hashlib
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore[import-not-found]
 
+DEFAULT_DATASET_PATH = "dataset/FACTS-Parametric-public.csv"
+
 
 def ensure_parent_dir(path: str) -> None:
     Path(path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+
+
+def load_json(path: Path | str) -> Any:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def save_json(path: Path | str, data: Any, *, indent: int = 2) -> None:
+    p = Path(path)
+    ensure_parent_dir(str(p))
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=indent, ensure_ascii=False)
+
+
+def save_text(path: Path | str, text: str) -> None:
+    p = Path(path)
+    ensure_parent_dir(str(p))
+    p.write_text(text, encoding="utf-8")
+
+
+def write_json_output(output_path: Path | str, payload: dict[str, Any]) -> None:
+    save_json(output_path, order_result_payload(payload))
 
 
 def load_yaml_config(path: str, model_name: str) -> dict[str, Any] | None:
@@ -73,8 +97,12 @@ def make_chat_completion_create_kwargs(
     }
 
 
+def strip_sensitive_config(config: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in config.items() if key != "api_key"}
+
+
 def sanitize_path_component(value: str) -> str:
-    cleaned = re.sub(r"[<>:\"/\\|?*\x00-\x1f]", "_", str(value))
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(value))
     cleaned = cleaned.strip().strip(".")
     return cleaned or "unknown"
 
@@ -95,7 +123,7 @@ def build_hash_key(query: Any, gold_answer: Any) -> str:
 
 
 def build_hash_key_from_dataset_row(row: dict[str, Any]) -> str:
-    return build_hash_key(row.get("query"), row.get("answer"))
+    return build_hash_key(row.get("query"), row.get("answer", row.get("gold_answer")))
 
 
 def build_hash_key_from_result_row(row: dict[str, Any]) -> str | None:
@@ -109,6 +137,31 @@ def build_hash_key_from_result_row(row: dict[str, Any]) -> str | None:
     return build_hash_key(query, gold_answer)
 
 
+def has_required_generation_fields(result: dict[str, Any]) -> bool:
+    required_fields = ["query", "llm_answer", "gold_answer"]
+    for key in required_fields:
+        if key not in result or result[key] is None or str(result[key]).strip() == "":
+            return False
+    return True
+
+
+def filter_results_with_non_empty_answers(
+    results: list[Any],
+    context: str,
+) -> list[Any]:
+    filtered: list[Any] = []
+    for idx, result in enumerate(results):
+        if not isinstance(result, dict):
+            filtered.append(result)
+            continue
+        if has_non_empty_text(result.get("llm_answer")):
+            filtered.append(result)
+            continue
+        hash_key = result.get("hash_key") or build_hash_key_from_result_row(result)
+        print(f"[{context}] Skip empty llm_answer at index {idx}, hash_key={hash_key}")
+    return filtered
+
+
 def order_result_payload(data: Any) -> Any:
     if not isinstance(data, dict) or "results" not in data:
         return data
@@ -120,7 +173,33 @@ def order_result_payload(data: Any) -> Any:
     return ordered
 
 
-def load_simpleqa_dataset(path: str, num_tasks: int | None) -> list[dict[str, Any]]:
+def build_default_result_path(
+    model_id: str,
+    dataset_path: str,
+    save_to: str | None = None,
+) -> Path:
+    if save_to:
+        return Path(save_to)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_slug = model_id.replace("/", "_")
+    test_set_slug = Path(dataset_path).stem
+    return Path(f"result/{model_slug}/{test_set_slug}/{timestamp}.json")
+
+
+def build_generation_output_payload(
+    model_config: dict[str, Any],
+    results: list[dict[str, Any]],
+    base_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = dict(base_payload) if base_payload else {}
+    if "calculate_mean_score" not in payload:
+        payload["calculate_mean_score"] = None
+    payload["model_config"] = strip_sensitive_config(model_config)
+    payload["results"] = results
+    return order_result_payload(payload)
+
+
+def load_facts_dataset(path: str, num_tasks: int | None) -> list[dict[str, Any]]:
     with open(path, "r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
     if num_tasks:
@@ -135,15 +214,12 @@ def load_simpleqa_dataset(path: str, num_tasks: int | None) -> list[dict[str, An
                 "hash_key": hash_key,
                 "query": query,
                 "gold_answer": gold_answer,
-                "topic": row.get("topic"),
-                "token": row.get("token"),
-                "urls": row.get("urls"),
             }
         )
     return normalized
 
 
-def load_simpleqa_output(path: str) -> dict[str, Any]:
+def load_generation_output(path: str) -> dict[str, Any]:
     p = Path(path)
     if not p.is_file():
         return {"results": []}
@@ -156,8 +232,8 @@ def load_simpleqa_output(path: str) -> dict[str, Any]:
     return {"results": []}
 
 
-def read_existing_generated_hash_keys_simpleqa(path: str) -> set[str]:
-    payload = load_simpleqa_output(path)
+def read_existing_generated_hash_keys(path: str) -> set[str]:
+    payload = load_generation_output(path)
     hash_keys: set[str] = set()
     for item in payload.get("results", []):
         if not (isinstance(item, dict) and has_non_empty_text(item.get("llm_answer"))):
@@ -168,7 +244,10 @@ def read_existing_generated_hash_keys_simpleqa(path: str) -> set[str]:
     return hash_keys
 
 
-def upsert_simpleqa_results(existing: list[dict[str, Any]], updates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def upsert_generation_results(
+    existing: list[dict[str, Any]],
+    updates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     filtered_existing: list[dict[str, Any]] = []
     for item in existing:
         if not isinstance(item, dict) or has_non_empty_text(item.get("llm_answer")):
@@ -199,3 +278,111 @@ def upsert_simpleqa_results(existing: list[dict[str, Any]], updates: list[dict[s
                 index_by_hash[hash_key] = len(existing)
             existing.append(item)
     return existing
+
+
+def custom_id_for_key(key: int) -> str:
+    return str(int(key))
+
+
+def extract_text_from_file_content(content: Any) -> str:
+    if hasattr(content, "text"):
+        return str(content.text)
+    if hasattr(content, "read"):
+        raw = content.read()
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8")
+        return str(raw)
+    return str(content)
+
+
+def _extract_message_content_from_body(body: Any) -> str:
+    if not isinstance(body, dict):
+        return ""
+    choices = body.get("choices")
+    if isinstance(choices, list) and choices:
+        choice = choices[0]
+        if isinstance(choice, dict):
+            message = choice.get("message") or {}
+            if isinstance(message, dict):
+                content = message.get("content")
+                if content is not None:
+                    return str(content)
+            text = choice.get("text")
+            if text is not None:
+                return str(text)
+    for field in ("output", "content"):
+        value = body.get(field)
+        if value is not None:
+            return str(value)
+    return ""
+
+
+def _extract_response_text_from_batch_object(obj: dict[str, Any]) -> str:
+    if obj.get("error"):
+        return ""
+
+    response = obj.get("response")
+    if isinstance(response, dict):
+        if response.get("error"):
+            return ""
+        status = response.get("status_code")
+        if status is not None and int(status) >= 400:
+            return ""
+        body = response.get("body")
+        if body is not None:
+            if isinstance(body, str):
+                try:
+                    body = json.loads(body)
+                except json.JSONDecodeError:
+                    return body
+            text = _extract_message_content_from_body(body)
+            if text:
+                return text
+        text = _extract_message_content_from_body(response)
+        if text:
+            return text
+
+    body = obj.get("body")
+    if isinstance(body, dict):
+        text = _extract_message_content_from_body(body)
+        if text:
+            return text
+    return ""
+
+
+def parse_batch_output(
+    output_text: str,
+    key_payloads: dict[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    key_results: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    custom_id_to_sk: dict[str, str] = {}
+    for sk, payload in key_payloads.items():
+        key = payload.get("key")
+        if key is not None:
+            custom_id_to_sk[custom_id_for_key(int(key))] = sk
+        custom_id_to_sk[str(sk)] = sk
+
+    for line in output_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as exc:
+            errors.append(str(exc))
+            continue
+        if not isinstance(obj, dict):
+            continue
+
+        custom_id = str(obj.get("custom_id", ""))
+        sk = custom_id_to_sk.get(custom_id)
+        if sk is None and custom_id in key_payloads:
+            sk = custom_id
+        if sk is None:
+            errors.append(f"unknown custom_id: {custom_id!r}")
+            continue
+
+        key_results[sk] = {"response": _extract_response_text_from_batch_object(obj)}
+
+    return key_results, errors
