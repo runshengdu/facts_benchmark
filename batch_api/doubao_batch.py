@@ -55,6 +55,8 @@ TERMINAL_JOB_PHASES = {
     "Success",
 }
 
+SUCCESS_JOB_PHASES = {"Finished", "Completed", "Success"}
+
 
 def volc_credentials() -> tuple[str, str]:
     ak = os.environ.get("VOLC_ACCESSKEY", "").strip()
@@ -435,9 +437,9 @@ def stage_collect(args: argparse.Namespace, run_dir: Path, job_obj: Any | None =
     ch["job_id"] = str(job_id)
     ch["job_phase"] = phase
 
-    if phase != "Finished":
+    if phase not in SUCCESS_JOB_PHASES:
         save_json(meta_path, metadata)
-        raise RuntimeError(f"batch job not finished, phase={phase}")
+        raise RuntimeError(f"batch job not finished successfully, phase={phase}")
 
     bucket = TOS_BUCKET
     output_jsonl = Path(ch["output_jsonl"])

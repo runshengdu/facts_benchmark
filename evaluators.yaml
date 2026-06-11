@@ -3,5 +3,11 @@ models:
     temperature: 1.0
     base_url: https://api.deepseek.com
     api_key: "${DEEPSEEK_API_KEY}"
-    max_tokens: 20000
+    max_tokens: 60000
     extra_body: {thinking: {type: enabled},reasoning_effort: "high"}
+  
+  - name: google/gemini-3.5-flash
+    temperature: 1.0
+    base_url: https://zenmux.ai/api/v1
+    api_key: "${ZENMUX_API_KEY}"
+    max_tokens: 60000
